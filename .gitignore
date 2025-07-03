@@ -1,2 +1,4 @@
 js/node_modules
 js/package-lock.json
+word2vec/target
+word2vec/Cargo.lock
