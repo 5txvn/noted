@@ -16,7 +16,11 @@ class WikipediaCollector {
       'also', 'just', 'like', 'so', 'very', 'such', 'one', 'two', 'first', 'second',
       'new', 'many', 'much', 'some', 'any', 'all', 'each', 'every', 'no', 'not',
       'however', 'than', 'then', 'too', 'more', 'most', 'other', 'others',
-      'because', 'if', 'when', 'where', 'while', 'although', 'though', 'until'
+      'because', 'if', 'when', 'where', 'while', 'although', 'though', 'until',
+      // ✅ Units and numeric suffixes
+      'inch', 'inches', 'feet', 'foot', 'ft', 'centimeter', 'centimeters', 'cm',
+      'meter', 'meters', 'm', 'mm', 'kilogram', 'kg', 'pound', 'pounds', 'lbs', 'oz',
+      'degree', 'degrees', '°f', '°c'
     ];
     extraStopwords.forEach(w => this.stopWords.add(w));
 
@@ -29,34 +33,47 @@ class WikipediaCollector {
 
   loadList(filename) {
     if (!fs.existsSync(filename)) return new Set();
-    const data = fs.readFileSync(filename, 'utf-8');
-    return new Set(JSON.parse(data));
+    return new Set(JSON.parse(fs.readFileSync(filename, 'utf-8')));
   }
 
   saveList(filename, dataSet) {
     fs.writeFileSync(filename, JSON.stringify(Array.from(dataSet), null, 2));
   }
 
-  cleanText(text) {
-    text = text.replace(/\([^)]*\)/g, ' ');
-    text = text.replace(/\{[^}]*\}/g, ' ');
-    text = text.replace(/\[[^\]]*\]/g, ' ');
-    text = text.replace(/<[^>]*>/g, ' ');
-    text = text.replace(/==.*?==/g, ' ');
-    text = text.replace(/\[\[(?:.*?\|)?(.*?)\]\]/g, '$1');
-    text = text.replace(/\s+/g, ' ').trim();
+  splitSentences(text) {
+    return text.split(/(?<=[.?!])\s+(?=[A-Z])/);
+  }
 
-    let words = text.split(' ').map(w => w.toLowerCase());
+  cleanSentence(sentence) {
+    sentence = sentence.replace(/\([^)]*\)/g, ' ');
+    sentence = sentence.replace(/\{[^}]*\}/g, ' ');
+    sentence = sentence.replace(/\[[^\]]*\]/g, ' ');
+    sentence = sentence.replace(/<[^>]*>/g, ' ');
+    sentence = sentence.replace(/==.*?==/g, ' ');
+    sentence = sentence.replace(/\[\[(?:.*?\|)?(.*?)\]\]/g, '$1');
+    sentence = sentence.replace(/-/g, ' ');
+    sentence = sentence.replace(/\s+/g, ' ').trim();
+
+    let words = sentence.split(' ').map(w => w.toLowerCase());
 
     words = words.filter(word => {
       if (!word) return false;
-      if (/\d/.test(word)) return false;
-      if (/[^a-z]/.test(word)) return false;
-      if (this.stopWords.has(word)) return false;
+      if (word.length === 1) return false;                  // ✅ Skip 1-letter words
+      if (/^\d+$/.test(word)) return false;                 // ✅ Skip numbers
+      if (/[^a-z]/.test(word)) return false;                // Skip non-alpha
+      if (this.stopWords.has(word)) return false;           // Skip stopwords (incl. units)
       return true;
     });
 
+    if (words.length < 4) return null;
     return words.join(' ');
+  }
+
+  cleanTextToSentences(text) {
+    const rawSentences = this.splitSentences(text);
+    return rawSentences
+      .map(sentence => this.cleanSentence(sentence))
+      .filter(Boolean); // remove nulls
   }
 
   async getPageViews(title) {
@@ -68,10 +85,9 @@ class WikipediaCollector {
     const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/${this.language}.wikipedia.org/all-access/user/${encodeURIComponent(title)}/daily/${start}/${end}`;
     try {
       const res = await axios.get(url);
-      const totalViews = res.data.items.reduce((sum, entry) => sum + entry.views, 0);
-      return totalViews;
-    } catch (err) {
-      return 0; // treat failures as zero views
+      return res.data.items.reduce((sum, entry) => sum + entry.views, 0);
+    } catch {
+      return 0;
     }
   }
 
@@ -81,13 +97,9 @@ class WikipediaCollector {
       const res = await axios.get(url);
       const pages = res.data.query.pages;
       const page = pages[Object.keys(pages)[0]];
-      if (!page || !page.extract) {
-        return '';
-      }
-      const cleaned = this.cleanText(page.extract);
-      return cleaned;
-    } catch (err) {
-      return '';
+      return page?.extract ? this.cleanTextToSentences(page.extract) : [];
+    } catch {
+      return [];
     }
   }
 
@@ -98,7 +110,7 @@ class WikipediaCollector {
         const url = `https://${this.language}.wikipedia.org/w/api.php?action=query&list=random&rnlimit=${Math.min(10, limit - titles.size)}&format=json&rnnamespace=0`;
         const res = await axios.get(url);
         res.data.query.random.forEach(page => {
-          if (!this.fetchedPages.has(page.title) && !titles.has(page.title)) {
+          if (!this.fetchedPages.has(page.title)) {
             titles.add(page.title);
           }
         });
@@ -109,11 +121,38 @@ class WikipediaCollector {
     return Array.from(titles);
   }
 
-  async collectCorpus(targetCorpusSize = 100, viewThreshold = 1000, delay = 250) {
+  async getPagesFromCategory(category, limit = 50) {
+    const titles = new Set();
+    let cmcontinue = null;
+
+    while (titles.size < limit) {
+      const url = `https://${this.language}.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category:${encodeURIComponent(category)}&cmlimit=50&format=json${cmcontinue ? `&cmcontinue=${cmcontinue}` : ''}`;
+      const res = await axios.get(url);
+      const pages = res.data.query.categorymembers;
+
+      for (const page of pages) {
+        if (page.ns === 0 && !this.fetchedPages.has(page.title)) {  // ns=0 means it's a main/article page
+          titles.add(page.title);
+          if (titles.size >= limit) break;
+        }
+      }
+
+      if (res.data.continue && res.data.continue.cmcontinue) {
+        cmcontinue = res.data.continue.cmcontinue;
+      } else {
+        break;
+      }
+    }
+
+    return Array.from(titles);
+  }
+
+  async collectCorpus(targetArticleCount = 10, viewThreshold = 1000, delay = 250) {
     const corpus = [];
-    while (corpus.length < targetCorpusSize) {
-      const batchSize = Math.min(10, targetCorpusSize - corpus.length);
-      const batch = await this.getRandomPages(batchSize * 3); // fetch extra in case some fail
+    let collectedArticles = 0;
+
+    while (collectedArticles < targetArticleCount) {
+      const batch = await this.getRandomPages((targetArticleCount - collectedArticles) * 3);
 
       for (const title of batch) {
         if (this.fetchedPages.has(title)) continue;
@@ -124,53 +163,48 @@ class WikipediaCollector {
           continue;
         }
 
-        const cleaned = await this.getPageContent(title);
-        if (cleaned && cleaned.length > 0) {
-          corpus.push(cleaned);
+        const cleanedSentences = await this.getPageContent(title);
+        if (cleanedSentences.length > 0) {
+          corpus.push(...cleanedSentences);
           this.fetchedPages.add(title);
-          console.log(`✅ ${corpus.length}/${targetCorpusSize}: ${title} (${views} views)`);
+          collectedArticles++;
+          console.log(`✅ ${collectedArticles}/${targetArticleCount}: ${title} (${views} views)`);
         } else {
           console.log(`⚠️ Skipped (empty content): ${title}`);
           this.skippedPages.add(title);
         }
 
-        if (corpus.length >= targetCorpusSize) break;
-
+        if (collectedArticles >= targetArticleCount) break;
         await new Promise(r => setTimeout(r, delay));
       }
     }
 
     this.saveList(this.fetchedPagesFile, this.fetchedPages);
     this.saveList(this.skippedPagesFile, this.skippedPages);
-
     return corpus;
   }
 
   saveCorpus(corpus, filename = 'wikipedia_corpus.json') {
     fs.writeFileSync(filename, JSON.stringify(corpus, null, 2), 'utf-8');
-    console.log(`✅ Corpus saved to ${filename} with ${corpus.length} entries.`);
+    console.log(`✅ Corpus saved to ${filename} with ${corpus.length} cleaned sentences.`);
   }
 
   loadCorpus(filename = 'wikipedia_corpus.json') {
-    if (!fs.existsSync(filename)) {
-      return [];
-    }
-    const data = fs.readFileSync(filename, 'utf-8');
-    const corpus = JSON.parse(data);
-    return corpus;
+    return fs.existsSync(filename)
+      ? JSON.parse(fs.readFileSync(filename, 'utf-8'))
+      : [];
   }
 }
 
 // ✅ Example usage
 (async () => {
   const collector = new WikipediaCollector();
+  const targetArticles = 10000;
+  const pageViewThreshold = 1000;
+  const delay = 250;
 
-  const targetCorpusSize = 1000;   // Number of valid entries in the final corpus
-  const pageViewThreshold = 2500; // Minimum views over past 30 days to accept a page
-  const delay = 250;              // Milliseconds between requests
-
-  console.log(`📦 Starting collection of ${targetCorpusSize} entries with min ${pageViewThreshold} views...`);
-
-  const corpus = await collector.collectCorpus(targetCorpusSize, pageViewThreshold, delay);
+  console.log(`📦 Collecting ${targetArticles} full articles...`);
+  const corpus = await collector.collectCorpus(targetArticles, pageViewThreshold, delay);
   collector.saveCorpus(corpus);
 })();
+//i can hear music

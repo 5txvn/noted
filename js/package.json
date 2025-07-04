@@ -11,7 +11,13 @@
   "description": "",
   "dependencies": {
     "axios": "^1.10.0",
+    "bzip2": "^0.1.1",
+    "lemmatizer": "^0.0.1",
     "natural": "^8.1.0",
-    "stopword": "^3.1.5"
+    "node-lemmatizer": "^1.0.3",
+    "sax": "^1.4.1",
+    "stopword": "^3.1.5",
+    "unbzip2-stream": "^1.4.3",
+    "xml-stream": "^0.4.5"
   }
 }
